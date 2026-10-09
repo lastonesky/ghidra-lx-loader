@@ -59,6 +59,21 @@ import yetmorecode.ghidra.format.lx.model.Executable;
  */
 public abstract class LinearLoader extends AbstractLibrarySupportLoader {
 
+	/**
+	 * Preferred language/compiler for DOS extenders.  The Watcom ABI is provided by
+	 * this extension (see data/languages/x86-watcom.ldefs) and is a good default for
+	 * DOS/4GW and DOS/16 style programs.
+	 */
+	private static final String WATCOM_LANGUAGE = "watcom:LE:32:default";
+	private static final String WATCOM_COMPILER_SPEC = "watcom";
+
+	/**
+	 * Fallback to the built-in x86 language.  Ghidra 12.1 removed the generic
+	 * "default" compiler spec, so a concrete compiler spec (gcc) must be used.
+	 */
+	private static final String X86_LANGUAGE = "x86:LE:32:default";
+	private static final String X86_COMPILER_SPEC = "gcc";
+
 	protected final static String CHECK = " " + (new String(new int[] { 0x2713 }, 0, 1)) + " ";
 	protected final static String CLOCK = " " + (new String(new int[] { 0x231b }, 0, 1)) + " ";
 	protected final static String HORSE = " " + (new String(new int[] { 0x2658 }, 0, 1)) + " ";
@@ -81,8 +96,14 @@ public abstract class LinearLoader extends AbstractLibrarySupportLoader {
 		var reader = new BinaryReader(provider, true);
 		try {
 			checkFormat(reader);
-			loadSpecs.add(new LoadSpec(this, 0, new LanguageCompilerSpecPair("watcom:LE:32:default", "watcom"), true));
-			loadSpecs.add(new LoadSpec(this, 0, new LanguageCompilerSpecPair("x86:LE:32:default", "gcc"), false));
+			// The first entry is the preferred load spec.  Since Ghidra 12.1 the
+			// old "x86:LE:32:default/default" pair no longer resolves, so we prefer
+			// the Watcom ABI shipped with this extension and offer the built-in
+			// x86 gcc spec as a fallback for plain inspection.
+			loadSpecs.add(new LoadSpec(this, 0,
+				new LanguageCompilerSpecPair(WATCOM_LANGUAGE, WATCOM_COMPILER_SPEC), true));
+			loadSpecs.add(new LoadSpec(this, 0,
+				new LanguageCompilerSpecPair(X86_LANGUAGE, X86_COMPILER_SPEC), false));
 		} catch (IOException e) {
 			Msg.error(this, String.format("IOException while parsing LxExecutable: %s", e.getMessage()));
 			e.printStackTrace();

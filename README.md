@@ -1,6 +1,23 @@
 # Ultimate Ghidra Loader for the LX/LE executable file format
 
+> **Ghidra 12.1.x is required.** The loader is no longer compatible with Ghidra 12.0.x
+> (Ghidra 12.1 changed `DataTypeComponent.setFieldName`, the `Loader` API and the
+> built-in x86 compiler specs).
+
 Download a zip matching your Ghidra version from [releases](https://github.com/yetmorecode/ghidra-lx-loader/releases) and install it from `File > Install extensions...`
+
+## Building from source
+
+The extension must be built against the Ghidra installation you intend to use it
+with.  Point `GHIDRA_INSTALL_DIR` at a Ghidra 12.1.x (or newer) installation and run
+the `buildExtension` task with the Gradle wrapper that ships with Ghidra:
+
+```
+export GHIDRA_INSTALL_DIR=/path/to/ghidra_12.1.4_PUBLIC
+$GHIDRA_INSTALL_DIR/support/gradle/gradlew buildExtension
+```
+
+The resulting extension zip is written to `dist/`.
 
 ## Features
 

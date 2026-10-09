@@ -47,6 +47,25 @@ else {
 }
 //----------------------END "DO NOT MODIFY" SECTION-------------------------------
 
+// This extension targets Ghidra 12.1.x and newer.  Older releases are not
+// supported anymore (Ghidra 12.1 changed the DataTypeComponent.setFieldName
+// signature, the Loader API and the built-in x86 compiler specs).  Fail early
+// with a clear message instead of producing a broken extension.
+def ghidraAppProps = new Properties()
+new File(ghidraInstallDir, "Ghidra/application.properties").withInputStream { ghidraAppProps.load(it) }
+def ghidraAppVersion = ghidraAppProps.getProperty("application.version", "0.0")
+def versionMatcher = (ghidraAppVersion =~ /^(\d+)\.(\d+)/)
+if (!versionMatcher.find()) {
+	throw new GradleException("Unable to determine Ghidra version from " + ghidraAppVersion)
+}
+def ghidraMajor = versionMatcher.group(1) as int
+def ghidraMinor = versionMatcher.group(2) as int
+if (ghidraMajor < 12 || (ghidraMajor == 12 && ghidraMinor < 1)) {
+	throw new GradleException(
+		"ghidra-lx-loader requires Ghidra 12.1 or newer, but GHIDRA_INSTALL_DIR points to Ghidra " + ghidraAppVersion)
+}
+logger.lifecycle("Building ghidra-lx-loader for Ghidra " + ghidraAppVersion)
+
 repositories {
 	// Declare dependency repositories here.  This is not needed if dependencies are manually 
 	// dropped into the lib/ directory.
