@@ -1,8 +1,25 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <compiler_spec>
   <data_organization>
-    <integer_size value="4"/>
+    <absolute_max_alignment value="0"/>
+    <machine_alignment value="2"/>
+    <default_alignment value="1"/>
+    <default_pointer_alignment value="4"/>
     <pointer_size value="4"/>
+    <wchar_size value="4"/>
+    <short_size value="2"/>
+    <integer_size value="4"/>
+    <long_size value="4"/>
+    <long_long_size value="8"/>
+    <float_size value="4"/>
+    <double_size value="8"/>
+    <long_double_size value="10"/>
+    <size_alignment_map>
+      <entry size="1" alignment="1"/>
+      <entry size="2" alignment="2"/>
+      <entry size="4" alignment="4"/>
+      <entry size="8" alignment="4"/>
+    </size_alignment_map>
   </data_organization>
 
   <global>
@@ -11,6 +28,13 @@
 
   <stackpointer register="ESP" space="ram"/>
 
+  <!--
+    Open Watcom / DOS extender register convention.  The first four 4-byte or
+    smaller arguments are passed in EAX, EDX, EBX and ECX (in that order), the
+    remaining arguments are pushed on the stack.  EBX is a non-volatile arg
+    register (the callee preserves it), ECX/EDX are call-clobbered.  The caller
+    pops the stack arguments, hence extrapop="4".
+  -->
   <default_proto>
     <prototype name="__watcall" extrapop="4" stackshift="4">
       <input>
@@ -47,7 +71,135 @@
         <register name="EDI"/>
         <register name="EBP"/>
         <register name="ESP"/>
+        <register name="EBX"/>
       </unaffected>
     </prototype>
   </default_proto>
+
+  <!-- Watcom's __fastcall is an alias of the register convention above. -->
+  <prototype name="__fastcall" extrapop="4" stackshift="4">
+    <input>
+      <pentry minsize="1" maxsize="4">
+        <register name="EAX"/>
+      </pentry>
+      <pentry minsize="1" maxsize="4">
+        <register name="EDX"/>
+      </pentry>
+      <pentry minsize="1" maxsize="4">
+        <register name="EBX"/>
+      </pentry>
+      <pentry minsize="1" maxsize="4">
+        <register name="ECX"/>
+      </pentry>
+      <pentry minsize="1" maxsize="500" align="4">
+        <addr offset="4" space="stack"/>
+      </pentry>
+    </input>
+    <output killedbycall="true">
+      <pentry minsize="1" maxsize="4">
+        <register name="EAX"/>
+      </pentry>
+      <pentry minsize="5" maxsize="8">
+        <addr space="join" piece1="EDX" piece2="EAX"/>
+      </pentry>
+    </output>
+    <killedbycall>
+      <register name="EDX"/>
+      <register name="ECX"/>
+    </killedbycall>
+    <unaffected>
+      <register name="ESI"/>
+      <register name="EDI"/>
+      <register name="EBP"/>
+      <register name="ESP"/>
+      <register name="EBX"/>
+    </unaffected>
+  </prototype>
+
+  <!-- Standard stack-based C convention, caller cleans the stack. -->
+  <prototype name="__cdecl" extrapop="4" stackshift="4">
+    <input>
+      <pentry minsize="1" maxsize="500" align="4">
+        <addr offset="4" space="stack"/>
+      </pentry>
+    </input>
+    <output killedbycall="true">
+      <pentry minsize="1" maxsize="4">
+        <register name="EAX"/>
+      </pentry>
+      <pentry minsize="5" maxsize="8">
+        <addr space="join" piece1="EDX" piece2="EAX"/>
+      </pentry>
+    </output>
+    <unaffected>
+      <register name="ESP"/>
+      <register name="EBP"/>
+      <register name="ESI"/>
+      <register name="EDI"/>
+      <register name="EBX"/>
+    </unaffected>
+    <killedbycall>
+      <register name="ECX"/>
+      <register name="EDX"/>
+    </killedbycall>
+  </prototype>
+
+  <!-- Stack-based convention, callee cleans the stack. -->
+  <prototype name="__stdcall" extrapop="unknown" stackshift="4">
+    <input>
+      <pentry minsize="1" maxsize="500" align="4">
+        <addr offset="4" space="stack"/>
+      </pentry>
+    </input>
+    <output killedbycall="true">
+      <pentry minsize="1" maxsize="4">
+        <register name="EAX"/>
+      </pentry>
+      <pentry minsize="5" maxsize="8">
+        <addr space="join" piece1="EDX" piece2="EAX"/>
+      </pentry>
+    </output>
+    <unaffected>
+      <register name="ESP"/>
+      <register name="EBP"/>
+      <register name="ESI"/>
+      <register name="EDI"/>
+      <register name="EBX"/>
+    </unaffected>
+    <killedbycall>
+      <register name="ECX"/>
+      <register name="EDX"/>
+    </killedbycall>
+  </prototype>
+
+  <!-- C++ member function convention: this pointer in ECX, rest on stack. -->
+  <prototype name="__thiscall" extrapop="4" stackshift="4">
+    <input>
+      <pentry minsize="1" maxsize="4">
+        <register name="ECX"/>
+      </pentry>
+      <pentry minsize="1" maxsize="500" align="4">
+        <addr offset="4" space="stack"/>
+      </pentry>
+    </input>
+    <output killedbycall="true">
+      <pentry minsize="1" maxsize="4">
+        <register name="EAX"/>
+      </pentry>
+      <pentry minsize="5" maxsize="8">
+        <addr space="join" piece1="EDX" piece2="EAX"/>
+      </pentry>
+    </output>
+    <unaffected>
+      <register name="ESP"/>
+      <register name="EBP"/>
+      <register name="ESI"/>
+      <register name="EDI"/>
+      <register name="EBX"/>
+    </unaffected>
+    <killedbycall>
+      <register name="ECX"/>
+      <register name="EDX"/>
+    </killedbycall>
+  </prototype>
 </compiler_spec>

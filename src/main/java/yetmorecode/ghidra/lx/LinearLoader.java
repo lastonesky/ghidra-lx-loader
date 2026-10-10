@@ -27,6 +27,7 @@ import ghidra.program.model.listing.Program;
 import ghidra.program.model.reloc.Relocation;
 import ghidra.program.model.reloc.Relocation.Status;
 import ghidra.program.model.reloc.RelocationTable;
+import ghidra.program.model.symbol.ExternalLocation;
 import ghidra.program.model.symbol.MemReferenceImpl;
 import ghidra.program.model.symbol.RefType;
 import ghidra.program.model.symbol.SourceType;
@@ -69,10 +70,21 @@ public abstract class LinearLoader extends AbstractLibrarySupportLoader {
 
 	/**
 	 * Fallback to the built-in x86 language.  Ghidra 12.1 removed the generic
-	 * "default" compiler spec, so a concrete compiler spec (gcc) must be used.
+	 * "default" compiler spec, so a concrete compiler spec must be used.
 	 */
 	private static final String X86_LANGUAGE = "x86:LE:32:default";
 	private static final String X86_COMPILER_SPEC = "gcc";
+
+	/**
+	 * Additional built-in x86 compiler specs offered as alternatives, so the user
+	 * can pick the ABI that actually produced the module (Borland C++, MSVC,
+	 * Delphi, ...) instead of being forced into the Watcom register convention.
+	 * A wrong ABI makes every recovered function signature systematically wrong,
+	 * which is a common source of bogus decompiler output for LE/LX modules.
+	 */
+	private static final String X86_BORLAND_COMPILER_SPEC = "borlandcpp";
+	private static final String X86_DELPHI_COMPILER_SPEC = "borlanddelphi";
+	private static final String X86_MSVC_COMPILER_SPEC = "windows";
 
 	protected final static String CHECK = " " + (new String(new int[] { 0x2713 }, 0, 1)) + " ";
 	protected final static String CLOCK = " " + (new String(new int[] { 0x231b }, 0, 1)) + " ";
@@ -94,14 +106,25 @@ public abstract class LinearLoader extends AbstractLibrarySupportLoader {
 			return loadSpecs;
 		}
 		var reader = new BinaryReader(provider, true);
-		try {
+			try {
 			checkFormat(reader);
-			// The first entry is the preferred load spec.  Since Ghidra 12.1 the
-			// old "x86:LE:32:default/default" pair no longer resolves, so we prefer
-			// the Watcom ABI shipped with this extension and offer the built-in
-			// x86 gcc spec as a fallback for plain inspection.
+			// Ghidra 12.1 no longer resolves the old "x86:LE:32:default/default"
+			// pair, so every offered spec must name a concrete compiler spec.
+			//
+			// The Watcom ABI (shipped with this extension, see
+			// data/languages/x86-watcom.ldefs) stays the preferred default because
+			// DOS/4GW and DOS/16 modules are most commonly Watcom-built.  The
+			// remaining built-in x86 specs are offered as alternatives so a Borland,
+			// MSVC or Delphi module can be loaded with the matching calling
+			// convention instead of being forced into the Watcom register ABI.
 			loadSpecs.add(new LoadSpec(this, 0,
 				new LanguageCompilerSpecPair(WATCOM_LANGUAGE, WATCOM_COMPILER_SPEC), true));
+			loadSpecs.add(new LoadSpec(this, 0,
+				new LanguageCompilerSpecPair(X86_LANGUAGE, X86_BORLAND_COMPILER_SPEC), false));
+			loadSpecs.add(new LoadSpec(this, 0,
+				new LanguageCompilerSpecPair(X86_LANGUAGE, X86_MSVC_COMPILER_SPEC), false));
+			loadSpecs.add(new LoadSpec(this, 0,
+				new LanguageCompilerSpecPair(X86_LANGUAGE, X86_DELPHI_COMPILER_SPEC), false));
 			loadSpecs.add(new LoadSpec(this, 0,
 				new LanguageCompilerSpecPair(X86_LANGUAGE, X86_COMPILER_SPEC), false));
 		} catch (IOException e) {
@@ -143,6 +166,11 @@ public abstract class LinearLoader extends AbstractLibrarySupportLoader {
 			
 			// Add entrypoint, disassemble, ..
 			createEntrypoint(executable, program, monitor);
+
+			// Recover exported entry points from the Entry Table and external
+			// references from the import fixups.
+			createEntryTableSymbols(executable, program, monitor);
+			createImportSymbols(executable, program, monitor);
 			
 			onLoadSuccess(program);
 			program.endTransaction(id, true);
@@ -278,13 +306,30 @@ public abstract class LinearLoader extends AbstractLibrarySupportLoader {
 		for (var object : executable.objects) {
 			monitor.setMessage(String.format(ARROW + "Mapping .object%d", object.number));
 			byte[] block = createObjectBlock(program, executable, object, object.number == executable.objects.size());
-			program.getMemory().createInitializedBlock(
+			var memoryBlock = program.getMemory().createInitializedBlock(
 				".object" + object.number, 
 				space.getAddress(loaderOptions.getBaseAddress(object)), 
 				new ByteArrayInputStream(block), 
 				object.size, 
 				monitor, false
 			);
+
+			// Honour the object's own protection bits from the object table.  Ghidra
+			// needs read access for analysis in every case, but the write/execute bits
+			// are what tell the analyzer whether a block contains (disassemblable) code
+			// or (constant) data, so they must come from the file and not from defaults.
+			boolean readable = (object.flags & LinearObjectTableEntry.FLAG_READABLE) != 0;
+			boolean writeable = (object.flags & LinearObjectTableEntry.FLAG_WRITEABLE) != 0;
+			boolean executableFlag = (object.flags & LinearObjectTableEntry.FLAG_EXECUTABLE) != 0;
+			memoryBlock.setRead(true);
+			memoryBlock.setWrite(writeable);
+			memoryBlock.setExecute(executableFlag);
+			memoryBlock.setComment(String.format(
+				"Object #%d, %s (flags %04x)",
+				object.number,
+				(readable ? "r" : "-") + (writeable ? "w" : "-") + (executableFlag ? "x" : "-"),
+				object.flags
+			));
 		}
 	}
 	
@@ -344,10 +389,42 @@ public abstract class LinearLoader extends AbstractLibrarySupportLoader {
 			for (var fix : le.fixups.get(index)) {
 				var f = (FixupRecord)fix;
 				var addr = space.getAddress(f.getSourceAddress());
-				
+
+				int targetType = f.targetFlags & LinearFixupRecord.TARGET_TYPE_MASK;
+				boolean importTarget = targetType == LinearFixupRecord.TARGET_IMPORT_ORDINAL
+						|| targetType == LinearFixupRecord.TARGET_IMPORT_NAME;
+				int objectIndex = f.objectNumber - 1;
+				if (importTarget || objectIndex < 0 || objectIndex >= le.objects.size()) {
+					// Imported / forwarded fixups carry a module ordinal and an imported
+					// ordinal (or procedure name offset) instead of an internal object
+					// offset.  Their runtime value is resolved by the extender, so
+					// patching the page with an internal base address would corrupt it.
+					// Record the relocation and leave the bytes alone; the external
+					// symbol/reference is added later by createImportSymbols().
+					fixupsUnhandled++;
+					if (!loaderOptions.relocationTableDisabled) {
+						relocationTable.add(
+							addr, Relocation.Status.UNSUPPORTED, f.getSourceType(),
+							null, 0,
+							String.format("import_%s_%08x", f.shortname(), f.getSourceAddress())
+						);
+					}
+					continue;
+				}
+
 				// Apply the actual fixup
-				int base = loaderOptions.getBaseAddress(le.objects.get(f.objectNumber-1));
+				int base = loaderOptions.getBaseAddress(le.objects.get(objectIndex));
 				fixupsByType[f.getSourceType()]++;
+
+				// A source-list fixup applies the same relocation at several offsets
+				// inside the page.  Iterate over them by temporarily moving the
+				// record's sourceOffset, so the per-type logic below is reused
+				// unchanged and every listed offset is fixed up.
+				short savedSourceOffset = f.sourceOffset;
+				short[] sourceOffsets = f.hasSourceList() ? toSourceOffsets(f.sourceList) : new short[] { f.sourceOffset };
+				for (int pass = 0; pass < sourceOffsets.length; pass++) {
+					f.sourceOffset = sourceOffsets[pass];
+					addr = space.getAddress(f.getSourceAddress());
 				
 				/*
 				 * The sourceOffset for each fixup can range from -3 to pageData.length -1.
@@ -538,6 +615,8 @@ public abstract class LinearLoader extends AbstractLibrarySupportLoader {
 					);
 					fixupsUnhandled++;
 				}
+				}
+				f.sourceOffset = savedSourceOffset;
 				
 			}
 			
@@ -716,6 +795,123 @@ public abstract class LinearLoader extends AbstractLibrarySupportLoader {
 		}
 	}
 	
+	/**
+	 * Creates functions, labels and entry points for the exported entries of the
+	 * LE/LX Entry Table.  The Entry Table is authoritative about call targets, so
+	 * this recovers function starts that a plain disassembly sweep would miss.
+	 */
+	private void createEntryTableSymbols(Executable exe, Program program, TaskMonitor monitor) {
+		var entryTable = exe.entryTable;
+		if (entryTable == null || entryTable.entries.isEmpty()) {
+			return;
+		}
+		monitor.setMessage(String.format(ARROW + "Creating entry table symbols (%d entries)", entryTable.entries.size()));
+		var space = program.getAddressFactory().getDefaultAddressSpace();
+		var api = new FlatProgramAPI(program, monitor);
+		int created = 0;
+		for (var entry : entryTable.entries) {
+			String name = exe.getEntryName(entry.ordinal);
+			if (name == null) {
+				name = "ENTRY_" + entry.ordinal;
+			}
+			if (entry.isForwarder()) {
+				// Forwarded entry: the target lives in another module.
+				createExternalFunction(program, "module_" + entry.moduleOrdinal, name);
+				continue;
+			}
+			if (entry.objectNumber < 1 || entry.objectNumber > exe.objects.size()) {
+				continue;
+			}
+			var object = exe.objects.get(entry.objectNumber - 1);
+			long offset = entry.offset & 0xffffffffL;
+			if (offset >= (object.size & 0xffffffffL)) {
+				// Entry points outside the object are malformed; do not create a
+				// function at a bogus address.
+				continue;
+			}
+			long address = (loaderOptions.getBaseAddress(object) & 0xffffffffL) + offset;
+			var addr = space.getAddress(address);
+			try {
+				program.getSymbolTable().createLabel(addr, name, SourceType.IMPORTED);
+			} catch (Exception e) {
+				// A label may already exist (e.g. _entry at the same address).
+			}
+			try {
+				api.createFunction(addr, name);
+				if (entry.isExported()) {
+					api.addEntryPoint(addr);
+				}
+				created++;
+			} catch (Exception e) {
+				Msg.warn(this, String.format("Could not create function %s at %s: %s", name, addr, e.getMessage()));
+			}
+		}
+		log(CHECK + "Entry table: %d functions created", created);
+	}
+
+	/**
+	 * Resolves import fixups (imported by ordinal or by name) into Ghidra external
+	 * symbols and adds a reference from the fixup site, so imported calls are named
+	 * instead of showing up as raw offsets.
+	 */
+	private void createImportSymbols(Executable exe, Program program, TaskMonitor monitor) {
+		if (exe.imports == null || exe.imports.isEmpty()) {
+			return;
+		}
+		int references = 0;
+		for (int page = 1; page <= exe.header.pageCount; page++) {
+			for (var fix : exe.fixups.get(page)) {
+				var f = (FixupRecord)fix;
+				int targetType = f.targetFlags & LinearFixupRecord.TARGET_TYPE_MASK;
+				if (targetType != LinearFixupRecord.TARGET_IMPORT_ORDINAL
+						&& targetType != LinearFixupRecord.TARGET_IMPORT_NAME) {
+					continue;
+				}
+				String module = exe.imports.getModuleName(f.ordinalIndex);
+				if (module == null || module.isEmpty()) {
+					module = "module_" + f.ordinalIndex;
+				}
+				String procedure = null;
+				if (targetType == LinearFixupRecord.TARGET_IMPORT_NAME) {
+					procedure = exe.imports.getProcedureName(f.ordinalNumber);
+				}
+				if (procedure == null || procedure.isEmpty()) {
+					procedure = "Ordinal_" + f.ordinalNumber;
+				}
+				var location = createExternalFunction(program, module, procedure);
+				if (location == null) {
+					continue;
+				}
+				var from = program.getAddressFactory().getDefaultAddressSpace().getAddress(f.getSourceAddress());
+				var unit = program.getListing().getCodeUnitContaining(from);
+				if (unit != null) {
+					from = unit.getAddress();
+				}
+				program.getReferenceManager().addMemoryReference(
+					from, location.getAddress(), RefType.DATA, SourceType.IMPORTED, 0);
+				references++;
+			}
+		}
+		log(CHECK + "Import fixups: %d external references created", references);
+	}
+
+	private ExternalLocation createExternalFunction(Program program, String libraryName, String functionName) {
+		try {
+			return program.getExternalManager().addExtFunction(libraryName, functionName, null, SourceType.IMPORTED);
+		} catch (Exception e) {
+			Msg.warn(this, String.format("Could not create external %s::%s: %s", libraryName, functionName, e.getMessage()));
+			return null;
+		}
+	}
+
+	private static short[] toSourceOffsets(java.util.List<Short> list) {
+		short[] result = new short[list.size()];
+		for (int i = 0; i < list.size(); i++) {
+			result[i] = (short) (list.get(i) & 0xffff);
+		}
+		return result;
+	}
+
 	private void log(String format, Object... args)  {
 		messageLog.appendMsg(String.format(format, args));
 	}

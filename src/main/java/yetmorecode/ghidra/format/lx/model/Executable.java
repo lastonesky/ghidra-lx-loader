@@ -26,6 +26,12 @@ public class Executable extends LinearExecutable {
     
     // VxD version resource (i.e. e32_winresoff)
     public VxDVersionResource vxd;
+
+    // LE/LX metadata tables used to recover symbols and entry points
+    public ImportTables imports;
+    public EntryTable entryTable;
+    public NameTable residentNames;
+    public NameTable nonResidentNames;
     
     // When there is no MZ header (i.e. unbound LE-Style executables), the new file header starts at 0
     public long lfanew = 0;
@@ -113,7 +119,63 @@ public class Executable extends LinearExecutable {
     			}
     		}
     	}
+
+		//	Import Module / Procedure Name Tables (header relative).
+		//	The procedure table ends right before the data pages section.
+		if (header.importModuleNameCount > 0 && header.importModuleNameTableOffset > 0) {
+			long procTableEnd = (lfamz + header.dataPagesOffset) - lfanew;
+			long procTableLength = Math.max(0, procTableEnd - header.importProcedureNameTableOffset);
+			imports = new ImportTables(
+				reader,
+				lfanew + header.importModuleNameTableOffset,
+				header.importModuleNameCount,
+				lfanew + header.importProcedureNameTableOffset,
+				procTableLength
+			);
+		}
+
+		//	Resident Name Table sits between the resource table and the entry table
+		//	(header relative).
+		if (header.residentNameTableOffset > 0 && header.entryTableOffset > header.residentNameTableOffset) {
+			residentNames = new NameTable(
+				reader,
+				lfanew + header.residentNameTableOffset,
+				lfanew + header.entryTableOffset
+			);
+		}
+
+		//	Entry Table (header relative). It is terminated by a zero count, but the
+		//	module directives table / fixup page table gives a hard upper bound.
+		if (header.entryTableOffset > 0) {
+			int entryEnd = (header.directivesTableOffset > header.entryTableOffset)
+				? header.directivesTableOffset
+				: header.fixupPageTableOffset;
+			entryTable = new EntryTable(reader, lfanew + header.entryTableOffset, lfanew + entryEnd);
+		}
+
+		//	Non-Resident Name Table (file relative per the OS/2 spec).
+		if (header.nameTableOffset > 0 && header.nameTableLength > 0) {
+			long nonResidentOffset = lfanew + header.nameTableOffset;
+			nonResidentNames = new NameTable(reader, nonResidentOffset, nonResidentOffset + header.nameTableLength);
+		}
     }
+	
+	/**
+	 * Returns the best name available for an entry table ordinal, consulting the
+	 * non-resident name table first and the resident name table second.
+	 */
+	public String getEntryName(int ordinal) {
+		if (nonResidentNames != null) {
+			String name = nonResidentNames.byOrdinal.get(ordinal);
+			if (name != null) {
+				return name;
+			}
+		}
+		if (residentNames != null) {
+			return residentNames.byOrdinal.get(ordinal);
+		}
+		return null;
+	}
 	
     /**
      * Returns the underlying binary reader.
